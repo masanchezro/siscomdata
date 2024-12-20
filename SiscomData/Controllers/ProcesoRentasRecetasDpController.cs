@@ -267,12 +267,26 @@ namespace SiscomData.Controllers
                             var dotacionResp = db.Tdcooxseguimientoequipos.FirstOrDefault(x => x.Cliente == item.Cliente && x.Codigo == int.Parse(item.Codigo));
                             await AddToSeguimientoEquipoRespAsync(dotacionResp);
 
-                            await connection.ExecuteAsync(GetUpdateQuery(), new
+
+                            if (dotacionResp.FechaBaja == null)
                             {
-                                Dotacion = item.EnvContEnv,
-                                Cliente = item.Cliente,
-                                Codigo = item.Codigo
-                            });
+                                await connection.ExecuteAsync(GetUpdateQueryConFecha(), new
+                                {
+                                    Dotacion = item.EnvContEnv,
+                                    Cliente = item.Cliente,
+                                    Codigo = item.Codigo,
+                                    Fecha = dotacionResp.FechaBaja
+                                });
+                            }
+                            else
+                            {
+                                await connection.ExecuteAsync(GetUpdateQuery(), new
+                                {
+                                    Dotacion = item.EnvContEnv,
+                                    Cliente = item.Cliente,
+                                    Codigo = item.Codigo
+                                });
+                            }
 
                             logEntries.Add($"{timestamp} - Actualizado - Cliente: {item.Cliente}, Codigo: {item.Codigo}, Nuevo EnvCont: {item.EnvContEnv}");
 
@@ -373,6 +387,11 @@ namespace SiscomData.Controllers
         private string GetUpdateQuery()
         {
             return @"UPDATE TDCOOXSEGUIMIENTOEQUIPO SET EnvCont = @Dotacion WHERE Cliente = @Cliente AND Codigo = @Codigo";
+        }
+
+        private string GetUpdateQueryConFecha()
+        {
+            return @"UPDATE TDCOOXSEGUIMIENTOEQUIPO SET EnvCont = @Dotacion, FechaBaja = @Fecha WHERE Cliente = @Cliente AND Codigo = @Codigo";
         }
 
         public class SeguimientoRequest
