@@ -344,6 +344,12 @@ namespace SiscomData.Controllers
         {
             try
             {
+                // Validar que el valor no sea nulo o vacío
+                if (string.IsNullOrEmpty(request.Value))
+                {
+                    return BadRequest(new { Error = "El valor proporcionado no puede ser nulo o vacío." });
+                }
+
                 using (var connection = db.Database.GetDbConnection())
                 {
                     if (connection.State != System.Data.ConnectionState.Open)
@@ -352,11 +358,13 @@ namespace SiscomData.Controllers
                     }
 
                     var logEntries = new List<string>();
-                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option}, Valores - {string.Join(", ", request.Pacientes)}");
+                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option}, Valor - {request.Value}");
 
+                    // Obtener la consulta dinámica en función del tipo de opción
                     string selectedQuery = GetQueryForOption(request.Option);
 
-                    var resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(selectedQuery, new { Pacientes = request.Pacientes });
+                    // Ejecutar la consulta con el valor único
+                    var resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(selectedQuery, new { valor = request.Value });
 
                     foreach (SeguimientoDotacionDto item in resultQuery)
                     {
@@ -369,7 +377,7 @@ namespace SiscomData.Controllers
                             var dotacionResp = db.Tdcooxseguimientoequipos.FirstOrDefault(x => x.Cliente == item.Cliente && x.Codigo == int.Parse(item.Codigo));
                             await AddToSeguimientoEquipoRespAsync(dotacionResp);
 
-                            if (dotacionResp.FechaBaja == null)
+                            if (dotacionResp?.FechaBaja == null)
                             {
                                 await connection.ExecuteAsync(GetUpdateQueryConFecha(), new
                                 {
@@ -378,8 +386,6 @@ namespace SiscomData.Controllers
                                     Codigo = item.Codigo,
                                     Fecha = dotacionResp.FechaAudit
                                 });
-
-                                //await InsertaOActualizaRentasVsRecetasDP(item.Cliente.ToString());
                             }
                             else
                             {
@@ -391,10 +397,13 @@ namespace SiscomData.Controllers
                                 });
                             }
 
+                            //await InsertaOActualizaRentasVsRecetasDP(item.Cliente.ToString());
+
                             logEntries.Add($"{timestamp} - Actualizado - Cliente: {item.Cliente}, Codigo: {item.Codigo}, Nuevo EnvCont: {item.EnvContEnv}");
                         }
                     }
 
+                    // Escribir log
                     await System.IO.File.AppendAllLinesAsync(CodigoLogFilePath, logEntries);
 
                     return Ok(new
@@ -412,6 +421,7 @@ namespace SiscomData.Controllers
                 });
             }
         }
+
 
         private async Task AddToSeguimientoEquipoRespAsync(Tdcooxseguimientoequipo seguimiento)
         {
@@ -505,6 +515,7 @@ namespace SiscomData.Controllers
         public class SeguimientoRequest
         {
             public string Option { get; set; } // clienteFirma, clienteAgrupado, paciente, pacientes
+            public string Value { get; set; } // clienteFirma, clienteAgrupado, paciente, pacientes
             public List<string> Pacientes { get; set; } // List of multiple pacientes to process
         }
     }
