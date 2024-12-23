@@ -21,7 +21,6 @@ namespace SiscomData.Controllers
         {
             db = context;
         }
-
         [HttpPost]
         [Route("ObtenerRentasRecetas")]
         public async Task<IActionResult> ObtenerRentasRecetas()
@@ -236,6 +235,109 @@ namespace SiscomData.Controllers
                 Cliente_Renta, 
                 Codigo_Renta;";
 
+
+        public async Task<bool> InsertaOActualizaRentasVsRecetasDP(string cliente)
+        {
+            var discrepancies = new List<object>();
+
+            // Obtener rentas del cliente
+            var rentas = db.Tdcooxrentasctes
+                .Where(x => x.Cliente.ToString() == cliente)
+                .Select(x => x.Codigo)
+                .ToList();
+
+            // Obtener recetas del cliente
+            var recetas = db.Tmcooxrecetadps
+                .Where(x => x.Cliente.ToString() == cliente && x.DpfechaInicio != null && x.DpfechaFin != null)
+                .Select(x => Convert.ToInt32(x.TipoServicio))
+                .ToList();
+
+            // Manejar caso 1 receta y 1 renta
+            if (rentas.Count == 1 && recetas.Count == 1)
+            {
+                var renta = rentas.First();
+                var receta = recetas.First();
+
+                if (renta != receta)
+                {
+                    discrepancies.Add(new
+                    {
+                        Cliente = cliente,
+                        Rentas = renta,
+                        Recetas = receta,
+                        Note = "1 vs 1"
+                    });
+
+                    string updateSql = $@"UPDATE Tdcooxrentascte 
+                                  SET Codigo = {receta}, 
+                                      FechaAudit = '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 
+                                      Observaciones = 'Actualizado 1vs1'
+                                  WHERE Cliente = '{cliente}' AND Codigo = {renta};";
+
+                    // Escribir la consulta de actualización en el archivo
+                    await System.IO.File.AppendAllTextAsync(OutputFilePath, updateSql + Environment.NewLine);
+                }
+            }
+            else
+            {
+                // Rentas y recetas desiguales
+                var rentasOnly = rentas.Except(recetas).ToList();
+                var recetasOnly = recetas.Except(rentas).ToList();
+
+                if (rentasOnly.Any() || recetasOnly.Any())
+                {
+                    discrepancies.Add(new
+                    {
+                        Cliente = cliente,
+                        RentasOnly = rentasOnly,
+                        RecetasOnly = recetasOnly
+                    });
+
+                    foreach (var codigo in recetasOnly)
+                    {
+                        if (codigo != 777255)
+                        {
+                            DateTime today = DateTime.Now;
+                            DateTime lastMonth = today.AddMonths(-1);
+                            int day = 30;
+
+                            DateTime fechaUltRentaDate = new DateTime(lastMonth.Year, lastMonth.Month, Math.Min(day, DateTime.DaysInMonth(lastMonth.Year, lastMonth.Month)));
+                            string fechaUltRenta = fechaUltRentaDate.ToString("yyyy-MM-dd HH:mm:ss");
+
+                            var recetaObj = db.Tmcooxrecetadps
+                                .Where(x => x.Cliente.ToString() == cliente && x.TipoServicio == codigo.ToString())
+                                .FirstOrDefault();
+
+                            var dotacionObj = db.Tmcoenv01s
+                                .Where(x => x.Cliente == Convert.ToInt32(cliente) && x.EnvCont > 0)
+                                .ToList();
+
+                            foreach (var itemDotacion in dotacionObj)
+                            {
+                                var prodObj = db.Tmcooxproductos
+                                    .FirstOrDefault(x => x.Codigo == itemDotacion.Codigo);
+
+                                if (prodObj != null)
+                                {
+                                    string sql = $@"INSERT INTO Tdcooxrentascte
+                                            (Sucursal, Cliente, Codigo, FechaUltRenta, CodigoEnvases, DotacionFinal, FolioFactura, FolioAltaRenta, ImprimirFactura, Usuario, FechaAudit, Observaciones, Pantalla)
+                                            VALUES
+                                            ('{recetaObj?.Sucursal}', '{cliente}', {prodObj.CodigoRenta}, '{fechaUltRenta}', {prodObj.Codigo}, {itemDotacion.EnvCont}, {recetaObj?.FolioFactura ?? 0}, 
+                                            0, 0, 'System', '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 'Auto: Actualiza Renta', 'CteFirma RR/RC');";
+
+                                    // Escribir la consulta de inserción en el archivo
+                                    await System.IO.File.AppendAllTextAsync(OutputFilePath, sql + Environment.NewLine);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+
         [HttpPost]
         [Route("ActualizaSeguimientoDotacion")]
         public async Task<IActionResult> ActualizaSeguimientoDotacion([FromBody] SeguimientoRequest request)
@@ -250,11 +352,11 @@ namespace SiscomData.Controllers
                     }
 
                     var logEntries = new List<string>();
-                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option}, Valor - {request.Value}");
-                     
+                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option}, Valores - {string.Join(", ", request.Pacientes)}");
+
                     string selectedQuery = GetQueryForOption(request.Option);
-                     
-                    var resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(selectedQuery, new { valor = request.Value });
+
+                    var resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(selectedQuery, new { Pacientes = request.Pacientes });
 
                     foreach (SeguimientoDotacionDto item in resultQuery)
                     {
@@ -267,7 +369,6 @@ namespace SiscomData.Controllers
                             var dotacionResp = db.Tdcooxseguimientoequipos.FirstOrDefault(x => x.Cliente == item.Cliente && x.Codigo == int.Parse(item.Codigo));
                             await AddToSeguimientoEquipoRespAsync(dotacionResp);
 
-
                             if (dotacionResp.FechaBaja == null)
                             {
                                 await connection.ExecuteAsync(GetUpdateQueryConFecha(), new
@@ -275,8 +376,10 @@ namespace SiscomData.Controllers
                                     Dotacion = item.EnvContEnv,
                                     Cliente = item.Cliente,
                                     Codigo = item.Codigo,
-                                    Fecha = dotacionResp.FechaBaja
+                                    Fecha = dotacionResp.FechaAudit
                                 });
+
+                                //await InsertaOActualizaRentasVsRecetasDP(item.Cliente.ToString());
                             }
                             else
                             {
@@ -289,9 +392,7 @@ namespace SiscomData.Controllers
                             }
 
                             logEntries.Add($"{timestamp} - Actualizado - Cliente: {item.Cliente}, Codigo: {item.Codigo}, Nuevo EnvCont: {item.EnvContEnv}");
-
                         }
-
                     }
 
                     await System.IO.File.AppendAllLinesAsync(CodigoLogFilePath, logEntries);
@@ -311,6 +412,7 @@ namespace SiscomData.Controllers
                 });
             }
         }
+
         private async Task AddToSeguimientoEquipoRespAsync(Tdcooxseguimientoequipo seguimiento)
         {
             try
@@ -333,7 +435,6 @@ namespace SiscomData.Controllers
 
                     await db.Tdcooxseguimientoequiposresps.AddAsync(newRecord);
                     await db.SaveChangesAsync();
-
                 }
             }
             catch (Exception ex)
@@ -348,37 +449,44 @@ namespace SiscomData.Controllers
             return option switch
             {
                 "clienteFirma" => @"select env.Cliente, env.Codigo, env.EnvCont as EnvContEnv, seg.EnvCont as EnvContSeg
-                                --distinct(env.Cliente)
-                                from TMCOENV01 env
-                                inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
-                                inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
-                                INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
-                                inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
-                                inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
-                                where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
-                                and GRAL.TipoCte = 'O' and cli.CteFirma = @valor;",
+                                    from TMCOENV01 env
+                                    inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
+                                    inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
+                                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
+                                    inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
+                                    inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
+                                    where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
+                                    and GRAL.TipoCte = 'O' and cli.CteFirma = @valor;",
 
                 "clienteAgrupado" => @"select env.Cliente, env.Codigo, env.EnvCont as EnvContEnv, seg.EnvCont as EnvContSeg
-                                --distinct(env.Cliente)
-                                from TMCOENV01 env
-                                inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
-                                inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
-                                INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
-                                inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
-                                inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
-                                where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
-                                and GRAL.TipoCte = 'O' and gral.SubTipoCte = @valor;",
+                                    from TMCOENV01 env
+                                    inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
+                                    inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
+                                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
+                                    inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
+                                    inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
+                                    where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
+                                    and GRAL.TipoCte = 'O' and gral.SubTipoCte = @valor;",
 
                 "paciente" => @"select env.Cliente, env.Codigo, env.EnvCont as EnvContEnv, seg.EnvCont as EnvContSeg
-                                --distinct(env.Cliente)
-                                from TMCOENV01 env
-                                inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
-                                inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
-                                INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
-                                inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
-                                inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
-                                where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
-                                and GRAL.TipoCte = 'O' and cli.cliente = @valor;",
+                                    from TMCOENV01 env
+                                    inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
+                                    inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
+                                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
+                                    inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
+                                    inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
+                                    where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
+                                    and GRAL.TipoCte = 'O' and cli.cliente = @valor;",
+
+                "pacientes" => @"select env.Cliente, env.Codigo, env.EnvCont as EnvContEnv, seg.EnvCont as EnvContSeg
+                                    from TMCOENV01 env
+                                    inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
+                                    inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
+                                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
+                                    inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
+                                    inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
+                                    where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
+                                    and GRAL.TipoCte = 'O' and cli.cliente IN @Pacientes;",
 
                 _ => throw new ArgumentException("Opción no válida"),
             };
@@ -396,26 +504,8 @@ namespace SiscomData.Controllers
 
         public class SeguimientoRequest
         {
-            public string Option { get; set; } // clienteFirma, clienteAgrupado, paciente
-            public string Value { get; set; } // Value to filter (e.g., ClienteFirma)
+            public string Option { get; set; } // clienteFirma, clienteAgrupado, paciente, pacientes
+            public List<string> Pacientes { get; set; } // List of multiple pacientes to process
         }
-
-        string seguimientoEquiposUpdateQuery = @"Update TDCOOXSEGUIMIENTOEQUIPO set EnvCont = @Dotacion where cliente = @Cliente and codigo = @Codigo";
-
-        string seguimientoEquiposQuery = @"SELECT * FROM TDCOOXSEGUIMIENTOEQUIPO where cliente = @Cliente and codigo = @Codigo";
-
-        string query = @"SELECT 
-                        env.Cliente, env.Codigo, env.EnvCont AS EnvContEnv, seg.EnvCont AS EnvContSeg
-                    FROM TMCOENV01 env
-                    INNER JOIN TDCOOXSEGUIMIENTOEQUIPO seg ON seg.Cliente = env.Cliente
-                    INNER JOIN TMCOOXCLIENTES cli ON cli.Cliente = seg.Cliente
-                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = cli.Cliente
-                    INNER JOIN TMCOINPROD01 prod01 ON prod01.Codigo = env.Codigo
-                    INNER JOIN TMCOOXPRODUCTOS prod ON prod.Codigo = prod01.Codigo
-                    WHERE seg.Codigo = env.Codigo 
-                        AND seg.EnvCont > env.EnvCont 
-                        AND env.EnvProp = 0 
-                        AND GRAL.TipoCte = 'O' 
-                        AND cli.CteFirma IN (@ClienteFirma)";
     }
 }
