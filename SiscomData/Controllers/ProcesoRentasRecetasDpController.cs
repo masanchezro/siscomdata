@@ -236,101 +236,91 @@ namespace SiscomData.Controllers
                 Codigo_Renta;";
 
 
-        public async Task<bool> InsertaOActualizaRentasVsRecetasDP(string cliente)
+        public async Task<bool> InsertaOActualizaRentasVsRecetasDP(string cliente, int anio, int mes, System.Data.Common.DbConnection connection)
         {
             var discrepancies = new List<object>();
+
+            DateTime today = DateTime.Now;
+            DateTime lastMonth = today.AddMonths(-1);
+            int day = 30;
+
+            DateTime fechaUltRentaDate = new DateTime(lastMonth.Year, lastMonth.Month, Math.Min(day, DateTime.DaysInMonth(lastMonth.Year, lastMonth.Month)));
+            string fechaUltRenta = fechaUltRentaDate.ToString("yyyy-MM-dd HH:mm:ss");
 
             // Obtener rentas del cliente
             var rentas = db.Tdcooxrentasctes
                 .Where(x => x.Cliente.ToString() == cliente)
-                .Select(x => x.Codigo)
                 .ToList();
 
             // Obtener recetas del cliente
             var recetas = db.Tmcooxrecetadps
-                .Where(x => x.Cliente.ToString() == cliente && x.DpfechaInicio != null && x.DpfechaFin != null)
-                .Select(x => Convert.ToInt32(x.TipoServicio))
+                .Where(x => x.Cliente.ToString() == cliente && x.DpfechaInicio != null && x.DpfechaFin != null && x.Anio == anio && x.Mes == mes)
                 .ToList();
 
-            // Manejar caso 1 receta y 1 renta
-            if (rentas.Count == 1 && recetas.Count == 1)
+            if (rentas.Count == 0 && recetas.Count > 0)
             {
-                var renta = rentas.First();
-                var receta = recetas.First();
+                string codigoEnvase = db.Tmcoenv01s.FirstOrDefault(x => x.EnvCont == 1).Codigo.ToString();
 
-                if (renta != receta)
+                string sqlInsert = $@"INSERT INTO Tdcooxrentascte (Sucursal, Cliente, Codigo, FechaUltRenta, CodigoEnvases, DotacionFinal, FolioFactura, FolioAltaRenta, ImprimirFactura, Usuario, FechaAudit, Observaciones, Pantalla) VALUES ('{recetas.FirstOrDefault()?.Sucursal}', '{recetas.FirstOrDefault()?.Cliente}', {recetas.FirstOrDefault()?.TipoServicio}, '{fechaUltRenta}', {codigoEnvase}, {1}, {recetas.FirstOrDefault()?.FolioFactura ?? 0}, 0, 0, 'System', '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 'Auto: Actualiza Renta', 'CteFirma RR/RC');";
+                await connection.ExecuteAsync(sqlInsert);
+                return true;
+            }
+
+            // Manejar caso 1 receta y 1 renta
+            else if (rentas.Count == 1 && recetas.Count == 1)
+            {
+                if (rentas.FirstOrDefault().Codigo.ToString() != recetas.FirstOrDefault().TipoServicio.ToString())
                 {
-                    discrepancies.Add(new
-                    {
-                        Cliente = cliente,
-                        Rentas = renta,
-                        Recetas = receta,
-                        Note = "1 vs 1"
-                    });
 
-                    string updateSql = $@"UPDATE Tdcooxrentascte 
-                                  SET Codigo = {receta}, 
-                                      FechaAudit = '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 
-                                      Observaciones = 'Actualizado 1vs1'
-                                  WHERE Cliente = '{cliente}' AND Codigo = {renta};";
+                    string updateSql = $@"UPDATE Tdcooxrentascte SET Codigo = {recetas.FirstOrDefault().TipoServicio},FechaUltRenta = {fechaUltRenta}, FechaAudit = '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', Observaciones = 'Actualizado 1vs1' WHERE Cliente = '{recetas.FirstOrDefault().Cliente}' AND Codigo = {rentas.FirstOrDefault().Codigo};";
+                    await connection.ExecuteAsync(updateSql);
 
                     // Escribir la consulta de actualización en el archivo
                     await System.IO.File.AppendAllTextAsync(OutputFilePath, updateSql + Environment.NewLine);
                 }
+                return true;
             }
-            else
+            else if (recetas.Count > 1)
             {
                 // Rentas y recetas desiguales
-                var rentasOnly = rentas.Except(recetas).ToList();
-                var recetasOnly = recetas.Except(rentas).ToList();
+                var rentasOnly = rentas.Where(x => x.Cliente.ToString() == cliente)
+                .Select(x => x.Codigo)
+                .ToList();
+
+                var recetasOnly = recetas.Where(x => x.Cliente.ToString() == cliente && x.DpfechaInicio != null && x.DpfechaFin != null)
+                .Select(x => Convert.ToInt32(x.TipoServicio))
+                .ToList();
 
                 if (rentasOnly.Any() || recetasOnly.Any())
                 {
-                    discrepancies.Add(new
-                    {
-                        Cliente = cliente,
-                        RentasOnly = rentasOnly,
-                        RecetasOnly = recetasOnly
-                    });
+                    //foreach (var codigo in recetasOnly)
+                    //{
+                    //var recetaObj = db.Tmcooxrecetadps
+                    //    .Where(x => x.Cliente.ToString() == cliente && x.TipoServicio == codigo.ToString())
+                    //    .FirstOrDefault();
 
-                    foreach (var codigo in recetasOnly)
+                    var dotacionObj = db.Tmcoenv01s.Where(x => x.Cliente == Convert.ToInt32(cliente) && x.EnvCont > 0).ToList();
+
+                    foreach (var itemDotacion in dotacionObj)
                     {
-                        if (codigo != 777255)
+                        var existeEnRentas = db.Tdcooxrentasctes.Any(x => x.Cliente == itemDotacion.Cliente && x.CodigoEnvases == itemDotacion.Codigo);
+
+                        if (!existeEnRentas)
                         {
-                            DateTime today = DateTime.Now;
-                            DateTime lastMonth = today.AddMonths(-1);
-                            int day = 30;
+                            var prodObj = db.Tmcooxproductos.FirstOrDefault(x => x.Codigo == itemDotacion.Codigo);
 
-                            DateTime fechaUltRentaDate = new DateTime(lastMonth.Year, lastMonth.Month, Math.Min(day, DateTime.DaysInMonth(lastMonth.Year, lastMonth.Month)));
-                            string fechaUltRenta = fechaUltRentaDate.ToString("yyyy-MM-dd HH:mm:ss");
-
-                            var recetaObj = db.Tmcooxrecetadps
-                                .Where(x => x.Cliente.ToString() == cliente && x.TipoServicio == codigo.ToString())
-                                .FirstOrDefault();
-
-                            var dotacionObj = db.Tmcoenv01s
-                                .Where(x => x.Cliente == Convert.ToInt32(cliente) && x.EnvCont > 0)
-                                .ToList();
-
-                            foreach (var itemDotacion in dotacionObj)
+                            if (prodObj != null)
                             {
-                                var prodObj = db.Tmcooxproductos
-                                    .FirstOrDefault(x => x.Codigo == itemDotacion.Codigo);
+                                string sqlInsert = $@"INSERT INTO Tdcooxrentascte (Sucursal, Cliente, Codigo, FechaUltRenta, CodigoEnvases, DotacionFinal, FolioFactura, FolioAltaRenta, ImprimirFactura, Usuario, FechaAudit, Observaciones, Pantalla) VALUES ('{itemDotacion?.Sucursal}', '{itemDotacion.Cliente}', {prodObj.CodigoRenta}, '{fechaUltRenta}', {prodObj.Codigo}, {itemDotacion.EnvCont}, {0}, 0, 0, '{itemDotacion.Usuario}', '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 'Auto: Actualiza Renta', '');";
+                                await connection.ExecuteAsync(sqlInsert);
 
-                                if (prodObj != null)
-                                {
-                                    string sql = $@"INSERT INTO Tdcooxrentascte
-                                            (Sucursal, Cliente, Codigo, FechaUltRenta, CodigoEnvases, DotacionFinal, FolioFactura, FolioAltaRenta, ImprimirFactura, Usuario, FechaAudit, Observaciones, Pantalla)
-                                            VALUES
-                                            ('{recetaObj?.Sucursal}', '{cliente}', {prodObj.CodigoRenta}, '{fechaUltRenta}', {prodObj.Codigo}, {itemDotacion.EnvCont}, {recetaObj?.FolioFactura ?? 0}, 
-                                            0, 0, 'System', '{DateTime.Now:yyyy-MM-dd HH:mm:ss}', 'Auto: Actualiza Renta', 'CteFirma RR/RC');";
-
-                                    // Escribir la consulta de inserción en el archivo
-                                    await System.IO.File.AppendAllTextAsync(OutputFilePath, sql + Environment.NewLine);
-                                }
+                                await System.IO.File.AppendAllTextAsync(OutputFilePath, sqlInsert + Environment.NewLine);
                             }
                         }
                     }
+                    return true;
+
+                    //}
                 }
             }
 
@@ -344,10 +334,19 @@ namespace SiscomData.Controllers
         {
             try
             {
-                // Validar que el valor no sea nulo o vacío
-                if (string.IsNullOrEmpty(request.Value))
+                if (request.Option == "pacientes")
                 {
-                    return BadRequest(new { Error = "El valor proporcionado no puede ser nulo o vacío." });
+                    if (request.Pacientes == null || request.Pacientes.Count == 0)
+                    {
+                        return BadRequest(new { Error = "El valor proporcionado no puede ser nulo o vacío." });
+                    }
+                }
+                else
+                {
+                    if (string.IsNullOrEmpty(request.Value))
+                    {
+                        return BadRequest(new { Error = "El valor proporcionado no puede ser nulo o vacío." });
+                    }
                 }
 
                 using (var connection = db.Database.GetDbConnection())
@@ -358,13 +357,42 @@ namespace SiscomData.Controllers
                     }
 
                     var logEntries = new List<string>();
-                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option}, Valor - {request.Value}");
+                    logEntries.Add($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - Iniciando Actualización: Opción - {request.Option} ");
 
-                    // Obtener la consulta dinámica en función del tipo de opción
                     string selectedQuery = GetQueryForOption(request.Option);
 
-                    // Ejecutar la consulta con el valor único
-                    var resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(selectedQuery, new { valor = request.Value });
+                    IEnumerable<SeguimientoDotacionDto> resultQuery = null;
+                    if (request.Option == "pacientes")
+                    {
+
+
+                        resultQuery = from env in db.Tmcoenv01s
+                                      join seg in db.Tdcooxseguimientoequipos on env.Cliente equals seg.Cliente
+                                      join cli in db.Tmcooxclientes on seg.Cliente equals cli.Cliente
+                                      join gral in db.Tmcoctgrals on cli.Cliente equals gral.Cliente
+                                      join prod01 in db.Tmcoinprod01s on env.Codigo equals prod01.Codigo
+                                      join prod in db.Tmcooxproductos on prod01.Codigo equals prod.Codigo
+                                      where seg.Codigo == env.Codigo
+                                          && seg.EnvCont > env.EnvCont
+                                          && env.EnvProp == 0
+                                          && gral.TipoCte == "O"
+                                          && request.Pacientes.Contains(cli.Cliente.ToString())
+                                      select new SeguimientoDotacionDto
+                                      {
+                                          Cliente = env.Cliente,
+                                          Codigo = env.Codigo.ToString(),
+                                          EnvContEnv = env.EnvCont,
+                                          EnvContSeg = seg.EnvCont
+                                      };
+
+                    }
+                    else
+                    {
+                        resultQuery = await connection.QueryAsync<SeguimientoDotacionDto>(
+                          GetQueryForOption(request.Option),
+                          new { valor = request.Value }
+                      );
+                    }
 
                     foreach (SeguimientoDotacionDto item in resultQuery)
                     {
@@ -397,13 +425,42 @@ namespace SiscomData.Controllers
                                 });
                             }
 
-                            //await InsertaOActualizaRentasVsRecetasDP(item.Cliente.ToString());
 
                             logEntries.Add($"{timestamp} - Actualizado - Cliente: {item.Cliente}, Codigo: {item.Codigo}, Nuevo EnvCont: {item.EnvContEnv}");
                         }
+
+
                     }
 
-                    // Escribir log
+                    IEnumerable<SeguimientoDotacionDto> resultQueryRentasVsRecetas = null;
+                    if (request.Option == "pacientes")
+                    {
+                        resultQueryRentasVsRecetas = db.Tmcooxclientes
+                            .Where(cli => request.Pacientes.Contains(cli.Cliente.ToString()))
+                            .Select(cli => new SeguimientoDotacionDto
+                            {
+                                Cliente = cli.Cliente,
+                                Codigo = cli.Clave
+                            })
+                            .ToList();
+                    }
+                    else
+                    {
+                        resultQueryRentasVsRecetas = await connection.QueryAsync<SeguimientoDotacionDto>(
+                        GetQueryForOptionRentasRecetas(request.Option),
+                        new { valor = request.Value });
+                    }
+
+                    foreach (SeguimientoDotacionDto item in resultQueryRentasVsRecetas)
+                    {
+                        bool esAseguradora = db.Tmcooxclientes.Any(x => x.TipoParticular == "AS" && x.Cliente == item.Cliente);
+
+                        if (esAseguradora)
+                        {
+                            await InsertaOActualizaRentasVsRecetasDP(item.Cliente.ToString(), request.anio, request.mes, connection);
+                        }
+                    }
+
                     await System.IO.File.AppendAllLinesAsync(CodigoLogFilePath, logEntries);
 
                     return Ok(new
@@ -489,18 +546,36 @@ namespace SiscomData.Controllers
                                     and GRAL.TipoCte = 'O' and cli.cliente = @valor;",
 
                 "pacientes" => @"select env.Cliente, env.Codigo, env.EnvCont as EnvContEnv, seg.EnvCont as EnvContSeg
-                                    from TMCOENV01 env
-                                    inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
-                                    inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
-                                    INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
-                                    inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
-                                    inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
-                                    where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
-                                    and GRAL.TipoCte = 'O' and cli.cliente IN @Pacientes;",
+                            from TMCOENV01 env
+                            inner join TDCOOXSEGUIMIENTOEQUIPO seg on seg.Cliente = env.Cliente
+                            inner join TMCOOXCLIENTES cli on cli.Cliente = seg.cliente
+                            INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente
+                            inner join TMCOINPROD01 prod01 on prod01.codigo = env.codigo
+                            inner join TMCOOXPRODUCTOS prod on prod.Codigo = prod01.Codigo
+                            where seg.Codigo = env.Codigo and seg.EnvCont > env.EnvCont and env.EnvProp = 0 
+                            and GRAL.TipoCte = 'O' and cli.cliente = @valor));",
 
                 _ => throw new ArgumentException("Opción no válida"),
             };
         }
+
+
+        private string GetQueryForOptionRentasRecetas(string option)
+        {
+            return option switch
+            {
+                "clienteFirma" => @" select cli.cliente FROM TMCOOXCLIENTES cli INNER JOIN TMCOCTGRAL GRAL ON GRAL.Cliente = Cli.Cliente where cli.CteFirma  = @valor;",
+
+                "clienteAgrupado" => @"select GRAL.cliente FROM TMCOCTGRAL GRAL WHERE GRAL.TipoCte = 'O' and gral.SubTipoCte = @valor;",
+
+                "paciente" => @"select cli.cliente FROM TMCOOXCLIENTES cli where cli.cliente = @valor;",
+
+                "pacientes" => @"select cli.cliente FROM TMCOOXCLIENTES cli where cli.cliente IN (SELECT value FROM  (@Pacientes);",
+
+                _ => throw new ArgumentException("Opción no válida"),
+            };
+        }
+
 
         private string GetUpdateQuery()
         {
@@ -516,7 +591,9 @@ namespace SiscomData.Controllers
         {
             public string Option { get; set; } // clienteFirma, clienteAgrupado, paciente, pacientes
             public string Value { get; set; } // clienteFirma, clienteAgrupado, paciente, pacientes
-            public List<string> Pacientes { get; set; } // List of multiple pacientes to process
+            public List<string> Pacientes { get; set; } // List of multiple pacientes to process 
+            public int anio { get; set; }
+            public int mes { get; set; }
         }
     }
 }
