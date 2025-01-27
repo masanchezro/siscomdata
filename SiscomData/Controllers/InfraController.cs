@@ -1,5 +1,4 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 using SiscomData.DAO;
@@ -9,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 
 namespace SiscomData.Controllers
 {
@@ -16,14 +16,21 @@ namespace SiscomData.Controllers
     [Route("api/[controller]")]
     public class InfraController : ControllerBase
     {
+
+
         private readonly BD_SISCOMV2_301Context db;
+        private readonly int sucursalActiva;
+
         int idPedido = 0;
         bool existeHistorico;
-        int sucursalActiva = 301;
+
         DateTime fechaRuteo = new DateTime();
-        public InfraController(BD_SISCOMV2_301Context context)
+        public InfraController(BD_SISCOMV2_301Context context, IConfiguration configuration)
         {
             db = context;
+
+            // Retrieve sucursalActiva from appSettings.json
+            sucursalActiva = configuration.GetValue<int>("SucursalActiva");
         }
 
 
@@ -51,18 +58,38 @@ namespace SiscomData.Controllers
                     //{
                     //    return  ;
                     //}
-
                     DateTime fechaRuteoSuc = await DabaseUtils.GetMaxFechaRuteo(db, connection, sucursalActiva);
                     DateTime fechaRuteoOxi = await DabaseUtils.GetMaxFechaRuteo(db, connection, sucursalActiva, true);
 
+
                     foreach (var Serie in ListadoSeriesOxidom)
                     {
+                        if (Serie.prioridad == "N")
+                        {
+                            fechaRuteo = fechaRuteoSuc;
+                        }
+                        else if (Serie.prioridad == "U") //Identificar la fecha de urgencia
+                        {
+                            fechaRuteo = fechaRuteoOxi;
+                        }
 
-                        var historico = await db.Thcooxrecepcionseries.Where(f => f.Pedido == int.Parse(Serie.servicio_Id)).FirstOrDefaultAsync();
+
+                        if (db.Tmcooxservicios.Any(f => f.Pedido == int.Parse(Serie.servicio_Id)
+                                                                 && f.Cliente == Serie.cliente
+                                                                 && f.FechaRuteo.Date == fechaRuteo.Date
+                                                                 && f.EstatusServicio.Trim().ToUpper() == "CO"))
+                        {
+                             break;
+                        }
+                         
+                         var historico = db.Thcooxrecepcionseries.Where(f => f.Pedido == int.Parse(Serie.servicio_Id)
+                                             && f.FechaRuteo.Value.Date == fechaRuteo.Date
+                                             && f.Cliente == Serie.cliente).FirstOrDefault(); //Obtener el registro historico para no duplicar entradas en caso de existir
                         if (historico == null)
                         {
                             historico = new Thcooxrecepcionseries();
                             historico.Pedido = int.Parse(Serie.servicio_Id);
+                            historico.FechaRuteo = fechaRuteo;
                             historico.Cliente = Serie.cliente;
                             historico.DetalleSerie = JsonConvert.SerializeObject(ListadoSeriesOxidom);
                             historico.FechaRecepcion = Serie.fechaRecepcion;
@@ -74,16 +101,6 @@ namespace SiscomData.Controllers
                         else
                         {
                             existeHistorico = true;
-                        }
-
-
-                        if (Serie.prioridad == "N")
-                        {
-                            fechaRuteo = fechaRuteoSuc;
-                        }
-                        else if (Serie.prioridad == "U") //Identificar la fecha de urgencia
-                        {
-                            fechaRuteo = fechaRuteoOxi;
                         }
 
                         var pedido = await db.Tmcooxservicios.Where(f => f.Pedido.ToString() == Serie.servicio_Id && f.Cliente == Serie.cliente && f.Sucursal == Serie.sucursal).FirstOrDefaultAsync();
@@ -98,79 +115,113 @@ namespace SiscomData.Controllers
                                 pedido.FechaInicioServ = Serie.fechaRecepcion;
                                 pedido.FechaTerminoServ = Serie.fechaRecepcion;
 
-                                //_context.Tmcooxservicios.Actualizar(pedido); 
+                                db.Tmcooxservicios.Update(pedido);
 
-                                //if (_context.tdeq.AlgunElemento(f => f.Cliente == Serie.Cliente && f.Codigo == Serie.Codigo && f.NoSerie == Serie.Serie))//En caso de que exista la serie en TDCOINCTEEQUIPO no hacer nada (Caso de uso FOR-IT-02, Pag.8, Reglas de negocio No. 6)
-                                //{
-                                //    historico.FechaRuteo = fechaRuteo;
-                                //    historico.Estatus = "P";
-                                //    historico.Observaciones = $"La serie ({Serie.Serie}) ya existe en Cliente-Equipo, no se procesará; Cliente:{Serie.Cliente}, Pedido:{Serie.servicio_Id}, Codigo:{Serie.Codigo}";
-
-                                //}
-
-                                foreach (var serie in ListadoSeriesOxidom)
+                                if (db.Tdcoincteequipos.Any(f => f.Cliente == Serie.cliente && f.Codigo == Serie.codigo && f.NoSerie == Serie.serie))//En caso de que exista la serie en TDCOINCTEEQUIPO no hacer nada (Caso de uso FOR-IT-02, Pag.8, Reglas de negocio No. 6)
                                 {
+                                    historico.FechaRuteo = fechaRuteo;
+                                    historico.Estatus = "P";
+                                    historico.Observaciones = $"La serie ({Serie.serie}) ya existe en Cliente-Equipo, no se procesará; Cliente:{Serie.cliente}, Pedido:{Serie.servicio_Id}, Codigo:{Serie.codigo}";
 
-                                    var producto = await db.Tmcooxproductos.Where(f => f.Codigo == Serie.codigo).FirstOrDefaultAsync();
-                                    if (producto != null && producto.RequiereFoto.Trim().ToUpper() == "S")
+                                }
+
+                                var producto = await db.Tmcooxproductos.Where(f => f.Codigo == Serie.codigo).FirstOrDefaultAsync();
+                                if (producto != null && producto.RequiereFoto.Trim().ToUpper() == "S")
+                                {
+                                    //var salidaSerie = db.RegistroSalidaSeries.Buscar(f => f.Sucursal == db.SucursalActiva && f.Cliente == Serie.Cliente).FirstOrDefault();
+                                    var salidaSerie = await db.Tdcooxseriessyes.Where(f => f.Sucursal == sucursalActiva && f.Serie.Trim() == Serie.serie.Trim()).FirstOrDefaultAsync();
+                                    if (salidaSerie != null)
                                     {
-                                        //var salidaSerie = db.RegistroSalidaSeries.Buscar(f => f.Sucursal == db.SucursalActiva && f.Cliente == Serie.Cliente).FirstOrDefault();
-                                        var salidaSerie = await db.Tdcooxseriessyes.Where(f => f.Sucursal == sucursalActiva && f.Serie.Trim() == Serie.serie.Trim()).FirstOrDefaultAsync();
-                                        if (salidaSerie != null)
-                                        {
-                                            //salidaSerie.Fecha = fechaRuteo; //Usar fecha ruteo
-                                            //salidaSerie.FechaAudit = DateTime.Now;
-                                            //salidaSerie.Serie = Serie.serie;
-                                            //salidaSerie.Codigo = Serie.codigo;
-                                            //salidaSerie.Cliente = Serie.cliente;
-                                            //db.Entry(salidaSerie).State = EntityState.Modified; 
-                                        }
-
-                                        //Solo sí se afecta un resgistro de serie
-                                        cliente.Sector = 1.ToString();
-                                        db.Entry(cliente).State = EntityState.Modified;
+                                        db.Entry(salidaSerie).Reload();
+                                        salidaSerie.Fecha = salidaSerie.Fecha; //Usar fecha ruteo
+                                        salidaSerie.FechaAudit = DateTime.Now;
+                                        salidaSerie.Serie = Serie.serie;
+                                        salidaSerie.Codigo = Serie.codigo;
+                                        salidaSerie.Cliente = Serie.cliente;
+                                        salidaSerie.Usuario = "CentralRuteo";
+                                        db.Entry(salidaSerie).State = EntityState.Modified;
                                     }
 
-                                    var contrato = await db.Tmcooxcontratos.Where(f => f.Cliente == Serie.cliente).OrderByDescending(f => f.IdContrato).FirstOrDefaultAsync();
-                                    if (contrato is null)
+                                    db.Tdcoincteequipos.Add(new Tdcoincteequipo
                                     {
-                                        var miscelaneo = await db.Tccogrmiscs.Where(f => f.Clave == "DATOSOXI").FirstOrDefaultAsync();
-                                        int noContrato;
-                                        if (int.TryParse(miscelaneo.Campo1, out noContrato))
-                                        {
-                                            //Tmcooxcontrato NuevoContrato = new Tmcooxcontrato();
-                                            //NuevoContrato.IdContrato = int.Parse(miscelaneo.Campo1);
-                                            //NuevoContrato.Cliente = Serie.cliente;
+                                        Cliente = Serie.cliente,
+                                        Cantidad = 1,
+                                        Codigo = Serie.codigo,
+                                        Modelo = Serie.modelo,
+                                        //Id_ClienteEquipo = Serie.Cliente,
+                                        NoActivoFijo = "",
+                                        NoSerie = Serie.serie.ToString(),   
+                                        Sucursal = short.Parse(sucursalActiva.ToString()),
+                                        TipoMovimiento = "",
+                                        Usuario = "CentralRuteo",
+                                        FechaUltMov = DateTime.Now,
+                                        FechaAlta = DateTime.Now,
+                                        FechaRevision = DateTime.Now
+                                    });
+                                    //Solo sí se afecta un resgistro de serie
+                                    cliente.Sector = 1.ToString();
+                                    db.Entry(cliente).State = EntityState.Modified;
+                                }
 
-                                            //miscelaneo.Campo1 = contrato.IdContrato++.ToString();
+                                var contrato = await db.Tmcooxcontratos.Where(f => f.Cliente == Serie.cliente).OrderByDescending(f => f.IdContrato).FirstOrDefaultAsync();
+                                if (contrato is null)
+                                {
+                                    var miscelaneo = await db.Tccogrmiscs.Where(f => f.Clave == "DATOSOXI").FirstOrDefaultAsync();
+                                    int noContrato;
+                                    if (int.TryParse(miscelaneo.Campo1, out noContrato))
+                                    {
+                                        noContrato = int.Parse(miscelaneo.Campo1) + 1;
+                                        miscelaneo.Campo1 = noContrato.ToString();
 
-                                            //db.Tccogrmiscs.Actualizar(miscelaneo);
-                                            //db.Tmcooxcontratos.Agregar(NuevoContrato);
-                                        }
+                                        Tmcooxcontrato NuevoContrato = new Tmcooxcontrato();
+                                        NuevoContrato.IdContrato = noContrato;
+                                        NuevoContrato.Cliente = Serie.cliente;
+                                        NuevoContrato.FechaUtlSincronizacion = DateTime.Now;
+                                        NuevoContrato.FechaAudit = DateTime.Now;
+                                        NuevoContrato.Tecnico = historico.Chofer.ToString();
+                                        NuevoContrato.MontoRenta = 0;
+                                        NuevoContrato.Deposito = 0;
+                                        NuevoContrato.Usuario = "CentralRuteo";
+
+                                        db.Tccogrmiscs.Update(miscelaneo);
+                                        db.Tmcooxcontratos.Add(NuevoContrato);
                                     }
+                                }
 
-                                    int.TryParse(Serie.servicio_Id, out idPedido);
-                                    var MovimientoEnvases = await db.Tdcoenvmovs.Where(f => f.Sucursal == Serie.sucursal
-                                   && f.Cliente == Serie.cliente && f.TipoMovimiento.Trim().ToUpper() == "I07" && f.FolioDeposito == idPedido).ToListAsync();
+                                int.TryParse(Serie.servicio_Id, out idPedido);
+                                var MovimientoEnvases = await db.Tdcoenvmovs.Where(f => f.Sucursal == Serie.sucursal
+                                                                                                    && f.Cliente == Serie.cliente
+                                                                                                    && f.TipoMovimiento.Trim().ToUpper() == "I07"
+                                                                                                    && f.FolioDeposito == idPedido).ToListAsync();
 
-                                    if (MovimientoEnvases != null && MovimientoEnvases.FirstOrDefault().EstatusEntrega != false)
-                                    {
+                                if (MovimientoEnvases != null && MovimientoEnvases.Count > 0)
+                                {
+                                    if (MovimientoEnvases.FirstOrDefault().EstatusEntrega != false)
                                         MovimientoEnvases.ForEach(i =>
                                         {
                                             i.EstatusEntrega = false;
                                             db.Entry(i).State = EntityState.Modified;
 
                                         });
-
-                                        //MovimientoEnvases.EstatusEntrega = false;
-                                        //db.MovimientosDeEnvases.Actualizar(MovimientoEnvases);
-                                    }
-
-                                    await db.SaveChangesAsync();
-
-                                }
+                                    //MovimientoEnvases.EstatusEntrega = false;
+                                    //db.MovimientosDeEnvases.Actualizar(MovimientoEnvases);
+                                } 
                             }
                         }
+                        else
+                        {
+                            historico.FechaRuteo = fechaRuteo;
+                            historico.Estatus = "E";
+                            historico.Observaciones = $"El pedido {Serie.servicio_Id}) está cancelado o no se ha rueteado: Cancelado:{pedido.Cancelado} Ruteado:{pedido.Ruteado}, no se procesará";
+                        }
+
+
+                        if (existeHistorico)
+                            db.Thcooxrecepcionseries.Update(historico);
+                        else
+                            db.Thcooxrecepcionseries.Add(historico);
+
+                        await db.SaveChangesAsync();
                     }
                 }
             }
@@ -345,6 +396,7 @@ namespace SiscomData.Controllers
                     foreach (var Serie in ListadoSeriesOxidom)
                     {
                         var pedido = await db.Tmcooxservicios.Where(f => f.Pedido.ToString() == Serie.servicio_Id && f.Cliente == Serie.cliente && f.Sucursal == Serie.sucursal).FirstOrDefaultAsync();
+                        var cliente = await db.Tmcooxclientes.Where(f => f.Cliente == Serie.cliente).FirstOrDefaultAsync();
 
                         if (pedido != null)  //Si el pedido existe de acuerdo a las condiciones previas.
                         {
@@ -355,21 +407,62 @@ namespace SiscomData.Controllers
                                 pedido.FechaInicioServ = Serie.fechaRecepcion;
                                 pedido.FechaTerminoServ = Serie.fechaRecepcion;
                             }
-                        }
-
-                        int.TryParse(Serie.servicio_Id, out idPedido);
-                        var MovEnvases = db.Tdcoenvmovs.Where(f => f.Sucursal == Serie.sucursal
-                                                                          && f.Cliente == Serie.cliente
-                                                                          && f.TipoMovimiento.Trim().ToUpper() == "I07"
-                                                                          && f.FolioDeposito == idPedido).ToList();
-
-                        if (MovEnvases != null && MovEnvases.FirstOrDefault().EstatusEntrega != false)
-                        {
-                            MovEnvases.ForEach(i =>
+                             
+                            var producto = await db.Tmcooxproductos.Where(f => f.Codigo == Serie.codigo).FirstOrDefaultAsync();
+                            if (producto != null && producto.RequiereFoto.Trim().ToUpper() == "S")
                             {
-                                i.EstatusEntrega = false;
-                                db.Entry(i).State = EntityState.Modified;
-                            });
+                                //var salidaSerie = db.RegistroSalidaSeries.Buscar(f => f.Sucursal == db.SucursalActiva && f.Cliente == Serie.Cliente).FirstOrDefault();
+                                var salidaSerie = await db.Tdcooxseriessyes.Where(f => f.Sucursal == sucursalActiva && f.Serie.Trim() == Serie.serie.Trim()).FirstOrDefaultAsync();
+                                if (salidaSerie != null)
+                                {
+                                    db.Entry(salidaSerie).Reload();
+                                    salidaSerie.Fecha = salidaSerie.Fecha; //Usar fecha ruteo
+                                    salidaSerie.FechaAudit = DateTime.Now;
+                                    salidaSerie.Serie = Serie.serie;
+                                    salidaSerie.Codigo = Serie.codigo;
+                                    salidaSerie.Cliente = Serie.cliente;
+                                    salidaSerie.Usuario = "CentralRuteo";
+                                    db.Entry(salidaSerie).State = EntityState.Modified;
+                                }
+
+                                db.Tdcoincteequipos.Add(new Tdcoincteequipo
+                                {
+                                    Cliente = Serie.cliente,
+                                    Cantidad = 1,
+                                    Codigo = Serie.codigo,
+                                    Modelo = Serie.modelo,
+                                    //Id_ClienteEquipo = Serie.Cliente,
+                                    NoActivoFijo = "",
+                                    NoSerie = Serie.serie.ToString(),
+                                    Sucursal = short.Parse(sucursalActiva.ToString()),
+                                    TipoMovimiento = "",
+                                    Usuario = "CentralRuteo",
+                                    FechaUltMov = DateTime.Now,
+                                    FechaAlta = DateTime.Now,
+                                    FechaRevision = DateTime.Now
+                                });
+                                //Solo sí se afecta un resgistro de serie
+                                cliente.Sector = 1.ToString();
+                                db.Entry(cliente).State = EntityState.Modified;
+                            }
+
+                            int.TryParse(Serie.servicio_Id, out idPedido);
+                            var MovEnvases = db.Tdcoenvmovs.Where(f => f.Sucursal == Serie.sucursal
+                                                                              && f.Cliente == Serie.cliente
+                                                                              && f.TipoMovimiento.Trim().ToUpper() == "I07"
+                                                                              && f.FolioDeposito == idPedido).ToList();
+
+                            if (MovEnvases != null && MovEnvases.FirstOrDefault().EstatusEntrega != false)
+                            {
+                                MovEnvases.ForEach(i =>
+                                {
+                                    i.EstatusEntrega = false;
+                                    db.Entry(i).State = EntityState.Modified;
+                                });
+                            }
+
+
+
                         }
 
                         await db.SaveChangesAsync();

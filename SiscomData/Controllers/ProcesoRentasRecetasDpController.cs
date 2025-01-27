@@ -308,9 +308,7 @@ namespace SiscomData.Controllers
                 });
             }
         }
-
-
-
+         
         private async Task AddToSeguimientoEquipoRespAsync(Tdcooxseguimientoequipo seguimiento)
         {
             try
@@ -431,7 +429,6 @@ namespace SiscomData.Controllers
                 _ => throw new ArgumentException("Opción no válida"),
             };
         }
-
 
         private string GetUpdateQuery()
         {
