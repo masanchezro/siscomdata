@@ -130,7 +130,7 @@ namespace SiscomData.Controllers
                 .ToList();
 
                 if (rentasOnly.Any() || recetasOnly.Any())
-                { 
+                {
 
                     var dotacionObj = db.Tmcoenv01s.Where(x => x.Cliente == Convert.ToInt32(cliente) && x.EnvCont > 0).ToList();
 
@@ -151,7 +151,7 @@ namespace SiscomData.Controllers
                             }
                         }
                     }
-                    return true; 
+                    return true;
                 }
             }
 
@@ -179,7 +179,7 @@ namespace SiscomData.Controllers
                         return BadRequest(new { Error = "El valor proporcionado no puede ser nulo o vacío." });
                     }
                 }
-                 
+
                 using (var connection = db.Database.GetDbConnection())
                 {
                     if (connection.State != System.Data.ConnectionState.Open)
@@ -228,12 +228,12 @@ namespace SiscomData.Controllers
                         logEntries.Add($"{timestamp} - Cliente: {item.Cliente}, Codigo: {item.Codigo}, EnvContEnv: {item.EnvContEnv}, EnvContSeg: {item.EnvContSeg}");
 
                         if (item.EnvContEnv != item.EnvContSeg)
-                        { 
+                        {
                             var dotacionResp = await db.Tdcooxseguimientoequipos
                                 .FirstOrDefaultAsync(x => x.Cliente == item.Cliente && x.Codigo == int.Parse(item.Codigo));
 
                             await AddToSeguimientoEquipoRespAsync(dotacionResp);
-                             
+
                             if (dotacionResp?.FechaBaja == null)
                             {
                                 await connection.ExecuteAsync(GetUpdateQueryConFecha(), new
@@ -278,7 +278,7 @@ namespace SiscomData.Controllers
                             new { valor = request.Value }
                         );
                     }
-                     
+
                     foreach (SeguimientoDotacionDto item in resultQueryRentasVsRecetas)
                     {
                         bool esAseguradora = db.Tmcooxclientes
@@ -308,7 +308,7 @@ namespace SiscomData.Controllers
                 });
             }
         }
-         
+
         private async Task AddToSeguimientoEquipoRespAsync(Tdcooxseguimientoequipo seguimiento)
         {
             try
@@ -358,6 +358,7 @@ namespace SiscomData.Controllers
                 and GRAL.TipoCte = 'O' 
                 and cli.CteFirma = @valor
                 and cli.FechaBaja < DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)
+                and cli.cancelado = 0
             order by cli.Cliente;
         ",
 
@@ -375,6 +376,7 @@ namespace SiscomData.Controllers
                 and GRAL.TipoCte = 'O' 
                 and GRAL.SubTipoCte = @valor
                 and cli.FechaBaja < DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)
+                and cli.cancelado = 0
             order by cli.Cliente;
         ",
 
@@ -391,6 +393,7 @@ namespace SiscomData.Controllers
                 and env.EnvProp = 0 
                 and GRAL.TipoCte = 'O' 
                 and cli.Cliente = @valor;
+                and cli.cancelado = 0
         ",
 
                 "pacientes" => @"
@@ -407,12 +410,13 @@ namespace SiscomData.Controllers
                 and GRAL.TipoCte = 'O' 
                 and cli.Cliente = @valor
                 and cli.FechaBaja < DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()), 0)
+                and cli.cancelado = 0
             order by cli.Cliente;
         ",
 
                 _ => throw new ArgumentException("Opción no válida"),
             };
-        } 
+        }
 
         private string GetQueryForOptionRentasRecetas(string option)
         {
